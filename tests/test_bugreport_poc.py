@@ -279,10 +279,10 @@ class TestBug009PortColors:
 class TestBug011FutureImportPosition:
     def test_py_compile_still_passes(self) -> None:
         import py_compile
+        from pathlib import Path
+        pkg_dir = Path(__file__).parent.parent / "netsight"
         for path in ("port_scan.py", "ping_sweep.py", "host_info.py"):
-            py_compile.compile(
-                f"D:/Networking/netsight/netsight/{path}", doraise=True
-            )
+            py_compile.compile(str(pkg_dir / path), doraise=True)
 
 
 # --------------------------------------------------------------------------

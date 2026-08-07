@@ -222,9 +222,20 @@ def sweep(
 
     targets = expand_subnet(cidr)
     icmp_results = ping_sweep(targets, max_workers, timeout_ms, progress_callback)
-    alive = [r for r in icmp_results if r.alive]
-    _fill_macs_from_arp_table(alive)
-    return alive
+    
+    from netsight.host_info import get_arp_table
+    arp_table = get_arp_table(force_refresh=True)
+    
+    alive_by_ip = {r.ip: r for r in icmp_results if r.alive}
+    target_set = set(targets)
+    
+    for ip, mac in arp_table.items():
+        if ip in target_set and ip not in alive_by_ip:
+            alive_by_ip[ip] = SweepResult(ip=ip, alive=True, mac=mac)
+        elif ip in alive_by_ip and alive_by_ip[ip].mac is None:
+            alive_by_ip[ip].mac = mac
+
+    return list(alive_by_ip.values())
 
 
 _ARP_CACHE: dict[str, str] | None = None
