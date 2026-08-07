@@ -1,0 +1,14 @@
+# ---- Core dependencies (required) ----
+rich>=13.0          # terminal UI: tables, panels, progress bars
+psutil>=5.9         # interface enumeration (netifaces fallback)
+pandas>=2.0         # data handling support (csv export uses stdlib csv)
+netifaces>=0.11 ; platform_system != "Windows"  # preferred iface discovery (needs build tools on Windows)
+
+# ---- Optional dependencies (code degrades gracefully without these) ----
+scapy>=2.5          # ARP sweep — requires admin/root raw-socket privileges
+python-nmap>=0.7    # --deep-scan OS fingerprinting (also needs the nmap binary)
+mac-vendor-lookup>=0.1.12  # full MAC OUI vendor database
+colorama>=0.4       # ANSI color support on legacy Windows terminals
+
+# ---- Development/test ----
+pytest>=8.0

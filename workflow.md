@@ -23,35 +23,35 @@ The repository is structured into modular Python components with clear separatio
 
 ```
 Networking/
+├── main.py                       # Global executable entry point / CLI launcher
+├── README.md                     # Project overview and quick start instructions
+├── requirements.txt              # Core and optional dependency definitions
+├── workflow.md                   # Complete workflow & architecture documentation
 ├── plan.md                       # Initial design spec & implementation plan
-├── workflow.md                   # Complete workflow & architecture documentation (this file)
-└── netsight/
-    ├── main.py                   # Global executable entry point / CLI launcher
-    ├── README.md                 # Project overview and quick start instructions
-    ├── requirements.txt          # Core and optional dependency definitions
-    ├── netsight.db               # SQLite local database (generated on first run)
-    ├── exports/                  # Timestamped CSV & JSON export directory (generated)
-    ├── netsight/
-    │   ├── __init__.py           # Package version definition (v1.0.0)
-    │   ├── cli.py                # Command-line interface, argument parsing & workflow driver
-    │   ├── models.py             # Dataclasses for HostResult and ScanResult
-    │   ├── discovery.py          # Network interface enumeration & target validation rules
-    │   ├── ping_sweep.py         # Threaded liveness engines (Scapy ARP & ICMP ping)
-    │   ├── host_info.py          # Hostname reverse-DNS & OS ARP table parsers
-    │   ├── vendor_lookup.py      # MAC OUI vendor resolution & offline fallback table
-    │   ├── os_fingerprint.py     # Passive TTL heuristic OS estimation & Nmap deep scan
-    │   ├── port_scan.py          # Multithreaded TCP connect port scanner & banner grabber
-    │   ├── exporter.py           # Structured CSV and JSON report generators
-    │   ├── history_db.py         # SQLite persistence layer for scan history
-    │   ├── ui.py                 # Terminal UI rendering (tables, panels, progress bars)
-    │   └── hooks/
-    │       └── __init__.py       # Post-scan lifecycle hook stubs (v1.1+ extension point)
-    └── tests/
-        ├── test_discovery.py     # Unit tests for interface detection & target gating
-        ├── test_exporter.py      # Unit tests for CSV/JSON generation
-        ├── test_history_db.py    # Unit tests for SQLite database persistence
-        ├── test_port_scan.py     # Unit tests for TCP port scanning logic
-        └── test_bugreport_poc.py # Diagnostic test suite
+├── BUGREPORT.md                  # Test suite & bug verification notes
+├── netsight.db                   # SQLite local database (generated on first run)
+├── exports/                      # Timestamped CSV & JSON export directory (generated)
+├── netsight/                     # Core Python source package
+│   ├── __init__.py               # Package version definition (v1.0.0)
+│   ├── cli.py                    # Command-line interface, argument parsing & workflow driver
+│   ├── models.py                 # Dataclasses for HostResult and ScanResult
+│   ├── discovery.py              # Network interface enumeration & target validation rules
+│   ├── ping_sweep.py             # Threaded liveness engines (Scapy ARP & ICMP ping)
+│   ├── host_info.py              # Hostname reverse-DNS & OS ARP table parsers
+│   ├── vendor_lookup.py          # MAC OUI vendor resolution & offline fallback table
+│   ├── os_fingerprint.py         # Passive TTL heuristic OS estimation & Nmap deep scan
+│   ├── port_scan.py              # Multithreaded TCP connect port scanner & banner grabber
+│   ├── exporter.py               # Structured CSV and JSON report generators
+│   ├── history_db.py             # SQLite persistence layer for scan history
+│   ├── ui.py                     # Terminal UI rendering (tables, panels, progress bars)
+│   └── hooks/
+│       └── __init__.py           # Post-scan lifecycle hook stubs (v1.1+ extension point)
+└── tests/
+    ├── test_discovery.py         # Unit tests for interface detection & target gating
+    ├── test_exporter.py          # Unit tests for CSV/JSON generation
+    ├── test_history_db.py        # Unit tests for SQLite database persistence
+    ├── test_port_scan.py         # Unit tests for TCP port scanning logic
+    └── test_bugreport_poc.py     # Diagnostic test suite
 ```
 
 ### Detailed Component Summary

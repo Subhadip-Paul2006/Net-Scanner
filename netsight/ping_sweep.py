@@ -17,6 +17,10 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
+#: Set to the RuntimeError message when an ARP sweep fails and ICMP is used
+#: as fallback, so callers can surface it to the user.
+last_fallback_reason: str | None = None
+
 try:  # scapy needs raw-socket privileges at runtime
     from scapy.all import ARP, Ether, srp  # type: ignore
 
@@ -194,6 +198,8 @@ def sweep(
         responders are returned; otherwise ICMP results are filtered to
         alive hosts.
     """
+    global last_fallback_reason
+    last_fallback_reason = None
     if prefer_arp and HAS_SCAPY:
         try:
             arp_results = arp_sweep(cidr, timeout=max(1.0, timeout_ms / 1000))
@@ -208,8 +214,11 @@ def sweep(
                         by_ip[res.ip].ttl = res.ttl
                         by_ip[res.ip].response_ms = res.response_ms
                 return list(by_ip.values())
-        except RuntimeError:
-            pass  # fall through to ICMP
+        except RuntimeError as exc:
+            last_fallback_reason = str(exc)
+
+    if prefer_arp and not HAS_SCAPY:
+        last_fallback_reason = "scapy is not installed"
 
     targets = expand_subnet(cidr)
     icmp_results = ping_sweep(targets, max_workers, timeout_ms, progress_callback)
