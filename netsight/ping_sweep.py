@@ -21,15 +21,50 @@ from dataclasses import dataclass
 #: as fallback, so callers can surface it to the user.
 last_fallback_reason: str | None = None
 
-try:  # scapy needs raw-socket privileges at runtime
-    from scapy.all import ARP, Ether, srp  # type: ignore
-
-    HAS_SCAPY = True
-except Exception:  # noqa: BLE001 - scapy import can raise non-ImportError
-    ARP = Ether = srp = None  # type: ignore[assignment]
-    HAS_SCAPY = False
-
 IS_WINDOWS = platform.system() == "Windows"
+
+# Lazy scapy import: importing scapy probes the OS's raw-socket providers at
+# import time (WMI/L0 lookups), which can take 30+ seconds on some Windows
+# hosts. Deferring the import until ``arp_sweep`` actually runs keeps simple
+# commands (``--help``, ``history``, ``quick`` when scapy isn't installed)
+# fast even when scapy is present.
+_ARP_MODULE = None
+
+
+def _arp_module():
+    """Lazily import scapy's ARP helpers (5s hard timeout).
+
+    Importing scapy probes raw-socket providers (GLPK, Npcap, WMI) on
+    Windows; on a poorly-configured host the import call can spin for
+    30+ seconds. Running it in a daemon thread with a finite ``join``
+    keeps ``netsight scan`` responsive even when the provider hangs.
+    """
+    global _ARP_MODULE
+    if _ARP_MODULE is not None:
+        return _ARP_MODULE
+
+    result_ref: list = []
+
+    def _import() -> None:
+        try:
+            from scapy.all import ARP, Ether, srp  # type: ignore  # noqa: TCH
+            result_ref.append((ARP, Ether, srp))
+        except Exception:  # noqa: BLE001 - scapy raises non-ImportError
+            result_ref.append(False)
+
+    worker = threading.Thread(target=_import, daemon=True)
+    worker.start()
+    worker.join(timeout=5.0)
+    if not result_ref or result_ref[0] is False:
+        # Cache the failure so we don't probe again during this process.
+        _ARP_MODULE = False
+        return None
+    _ARP_MODULE = result_ref[0]
+    return _ARP_MODULE
+
+
+def _has_scapy() -> bool:
+    return _arp_module() is not None
 
 
 @dataclass
@@ -65,9 +100,12 @@ def expand_subnet(cidr: str, limit: int = 65536) -> list[str]:
 def _ping_command(ip: str, timeout_ms: int) -> list[str]:
     """Build the OS-appropriate ping command for one echo request."""
     if IS_WINDOWS:
-        return ["ping", "-n", "1", "-w", str(timeout_ms), ip]
-    # Linux/macOS: -c count, -W per-reply timeout in seconds
-    timeout_s = max(1, round(timeout_ms / 1000))
+        # Clamp minimum to 1ms — ping -w 0 is invalid.
+        return ["ping", "-n", "1", "-w", str(max(1, timeout_ms)), ip]
+    # Linux/macOS: -c count, -W per-reply timeout in whole seconds.
+    # Ceiling division so 1500ms -> 2s (never truncate to 1s and drop
+    # slow hosts early); clamp to >= 1 so a 0/ms input can't hang ping.
+    timeout_s = max(1, (timeout_ms + 999) // 1000)
     return ["ping", "-c", "1", "-W", str(timeout_s), ip]
 
 
@@ -109,7 +147,7 @@ def ping_host(ip: str, timeout_ms: int = 800) -> SweepResult:
     return SweepResult(ip=ip, alive=False)
 
 
-def arp_sweep(cidr: str, timeout: float = 2.0) -> list[SweepResult]:
+def arp_sweep(cidr: str, timeout: float = 2.0) -> list[SweepResult]:  # noqa: N803
     """Discover alive hosts on the local subnet with ARP requests (scapy).
 
     Args:
@@ -122,8 +160,10 @@ def arp_sweep(cidr: str, timeout: float = 2.0) -> list[SweepResult]:
     Raises:
         RuntimeError: If scapy is unavailable or raw sockets are denied.
     """
-    if not HAS_SCAPY:
+    modules = _arp_module()
+    if modules is None:
         raise RuntimeError("scapy is not installed")
+    ARP, Ether, srp = modules
     try:
         packet = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=cidr)  # type: ignore[operator]
         answered, _ = srp(packet, timeout=timeout, verbose=False)  # type: ignore[misc]
@@ -145,7 +185,7 @@ def arp_sweep(cidr: str, timeout: float = 2.0) -> list[SweepResult]:
 
 def ping_sweep(
     targets: list[str],
-    max_workers: int = 64,
+    max_workers: int = 100,     # Plan2 Phase 4 — 100 workers for home LAN
     timeout_ms: int = 800,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> list[SweepResult]:
@@ -179,7 +219,7 @@ def ping_sweep(
 
 def sweep(
     cidr: str,
-    max_workers: int = 64,
+    max_workers: int = 100,
     timeout_ms: int = 800,
     prefer_arp: bool = True,
     progress_callback: Callable[[int, int], None] | None = None,
@@ -200,7 +240,10 @@ def sweep(
     """
     global last_fallback_reason
     last_fallback_reason = None
-    if prefer_arp and HAS_SCAPY:
+    if prefer_arp and _ARP_MODULE is False:
+        _fell_back = True  # scapy already failed once — skip retries
+
+    if prefer_arp and _has_scapy():
         try:
             arp_results = arp_sweep(cidr, timeout=max(1.0, timeout_ms / 1000))
             if arp_results:
@@ -217,18 +260,18 @@ def sweep(
         except RuntimeError as exc:
             last_fallback_reason = str(exc)
 
-    if prefer_arp and not HAS_SCAPY:
+    if prefer_arp and not _has_scapy():
         last_fallback_reason = "scapy is not installed"
 
     targets = expand_subnet(cidr)
     icmp_results = ping_sweep(targets, max_workers, timeout_ms, progress_callback)
-    
+
     from netsight.host_info import get_arp_table
     arp_table = get_arp_table(force_refresh=True)
-    
+
     alive_by_ip = {r.ip: r for r in icmp_results if r.alive}
     target_set = set(targets)
-    
+
     for ip, mac in arp_table.items():
         if ip in target_set and ip not in alive_by_ip:
             alive_by_ip[ip] = SweepResult(ip=ip, alive=True, mac=mac)
@@ -236,6 +279,49 @@ def sweep(
             alive_by_ip[ip].mac = mac
 
     return list(alive_by_ip.values())
+
+
+def sweep_multi(
+    cidrs: list[str],
+    max_workers: int = 100,
+    timeout_ms: int = 800,
+    prefer_arp: bool = True,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> list[SweepResult]:
+    """Sweep several CIDRs concurrently, one ThreadPoolExecutor each.
+
+    Args:
+        cidrs: List of subnets in CIDR notation.
+        max_workers: Thread pool size **per subnet** (total concurrent threads
+            = ``max_workers * len(cidrs)``).
+        timeout_ms: Per-host timeout for the ICMP fallback.
+        prefer_arp: Try scapy ARP sweep on each subnet when True.
+        progress_callback: Optional callable(completed, total). Completed =
+            number of subnets finished; total = len(cidrs).
+
+    Returns:
+        A merged list of :class:`SweepResult` from all subnets.
+    """
+    combined: list[SweepResult] = []
+    if not cidrs:
+        return combined
+
+    with ThreadPoolExecutor(max_workers=len(cidrs)) as subnet_pool:
+        futures = {
+            subnet_pool.submit(
+                sweep, cidr, max_workers, timeout_ms, prefer_arp,
+            ): cidr
+            for cidr in cidrs
+        }
+        completed = 0
+        for future in as_completed(futures):
+            combined.extend(future.result())
+            completed += 1
+            if progress_callback is not None:
+                progress_callback(completed, len(cidrs))
+
+    _fill_macs_from_arp_table(combined)  # Catch ICMP-only fallback paths.
+    return combined
 
 
 _ARP_CACHE: dict[str, str] | None = None

@@ -150,6 +150,12 @@ def show_results_table(scan: ScanResult) -> None:
         ports = ", ".join(str(p["port"]) for p in host.open_ports) or "[dim]-[/dim]"
         rtt = f"{host.response_ms:.1f}" if host.response_ms is not None else "-"
         os_style = "green" if host.os_guess != "Unknown" else "dim"
+        latency_badge = {
+            "excellent": "[green]Excellent[/green]",
+            "good": "[cyan]Good[/cyan]",
+            "poor": "[yellow]Poor[/yellow]",
+        }.get(host.latency_class, "[dim]unknown[/dim]")
+        rtt_cell = f"{rtt} {latency_badge}".strip()
         table.add_row(
             host.ip,
             "[green]● alive[/green]",
@@ -157,7 +163,7 @@ def show_results_table(scan: ScanResult) -> None:
             host.mac,
             host.vendor if host.vendor != "Unknown" else "[dim]Unknown[/dim]",
             f"[{os_style}]{host.os_guess}[/{os_style}]",
-            rtt,
+            rtt_cell,
             ports,
         )
     console.print(table)

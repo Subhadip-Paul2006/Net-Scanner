@@ -29,47 +29,50 @@ def parse_service_version(port: int, banner: str) -> str | None:
 
     Returns:
         A compact string such as ``"ssh OpenSSH_9.6"`` or
-        ``"http nginx/1.24.0"``, or None when nothing could be parsed.
+        ``"http nginx/1.24.0"`` when the banner identifies a specific
+        service. Falls back to the port's conventional service name
+        (e.g. ``"microsoft-ds"`` for 445) when the banner is empty or
+        doesn't match a known protocol — so the operator never sees a
+        useless "unknown" for a well-known open port.
     """
-    if not banner or not banner.strip():
-        return None
-    text = banner.strip()
+    if banner and banner.strip():
+        text = banner.strip()
 
-    # --- SSH ---
-    m = re.search(r"SSH-[\d.]+-([^\s]+)", text)
-    if m:
-        return f"ssh {m.group(1)}"
+        # --- SSH ---
+        m = re.search(r"SSH-[\d.]+-([^\s]+)", text)
+        if m:
+            return f"ssh {m.group(1)}"
 
-    # --- HTTP ---
-    m = re.search(
-        r"(?:HTTP/\d(?:\.\d)?\s+\d{3}.*?^|\n)Server:\s*([^\r\n]+)",
-        text, re.IGNORECASE | re.MULTILINE,
-    )
-    if m:
-        server = m.group(1).strip()
-        return f"http {server}" if server else "http"
-    if text.startswith("HTTP/"):
-        return "http"
+        # --- HTTP ---
+        m = re.search(
+            r"(?:HTTP/\d(?:\.\d)?\s+\d{3}.*?^|\n)Server:\s*([^\r\n]+)",
+            text, re.IGNORECASE | re.MULTILINE,
+        )
+        if m:
+            server = m.group(1).strip()
+            return f"http {server}" if server else "http"
+        if text.startswith("HTTP/"):
+            return "http"
 
-    # --- FTP ---
-    m = re.search(r"220[- ](.*)", text)
-    if m:
-        detail = m.group(1).strip()
-        return f"ftp {detail}" if detail else "ftp"
+        # --- FTP ---
+        m = re.search(r"220[- ](.*)", text)
+        if m:
+            detail = m.group(1).strip()
+            return f"ftp {detail}" if detail else "ftp"
 
-    # --- SMTP ---
-    if text.startswith("220") and "smtp" in text.lower():
-        return "smtp"
+        # --- SMTP ---
+        if text.startswith("220") and "smtp" in text.lower():
+            return "smtp"
 
-    # --- POP3 ---
-    if text.upper().startswith("+OK"):
-        return "pop3"
+        # --- POP3 ---
+        if text.upper().startswith("+OK"):
+            return "pop3"
 
-    # --- IMAP ---
-    if text.startswith("* OK") and "imap" in text.lower():
-        return "imap"
+        # --- IMAP ---
+        if text.startswith("* OK") and "imap" in text.lower():
+            return "imap"
 
-    # Unknown banner — fall back to the port's conventional service name.
+    # No/unknown banner — fall back to the port's conventional service name.
     default = _PORT_SERVICES.get(port)
     if default:
         return f"{default} (unidentified)"

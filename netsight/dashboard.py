@@ -58,11 +58,43 @@ def create_app(db_path: str | Path = "netsight.db") -> Flask:
     def _db() -> HistoryDB:
         return HistoryDB(app.config["DB_PATH"])
 
-    # --- index: scan History table ---
+    # --- index: scan History table + mini timeline chart ---
     @app.route("/")
     def index() -> str:
         with _db() as db:
             rows = db.list_scans(limit=200)
+
+        # --- activity chart (pure SVG, no JS deps) ---
+        chart_html = ""
+        if rows:
+            pts_x, pts_y, labels = [], [], []
+            W, H, pad = 720, 180, 32
+            series = [r["host_count"] for r in reversed(rows)]  # chrono order
+            max_hosts = max(series) or 1
+            n = len(series)
+            for i, v in enumerate(series):
+                x = pad + i * (W - 2 * pad) / max(n - 1, 1)
+                y = H - pad - (v / max_hosts) * (H - 2 * pad)
+                pts_x.append(x)
+                pts_y.append(y)
+                labels.append(f"#{rows[-(i + 1)]['id']}")
+            polyline = " ".join(f"{x:.0f},{y:.0f}"
+                                for x, y in zip(pts_x, pts_y))
+            circles = "".join(
+                f"<circle cx='{x:.0f}' cy='{y:.0f}' r='3' fill='#3fb950'>"
+                f"<title>{lab}: {v} hosts</title></circle>"
+                for x, y, v, lab in zip(pts_x, pts_y, series, labels)
+            )
+            chart_html = (
+                f"<h2 style='color:var(--dim);margin:0 0 8px 0'>"
+                f"Hosts discovered over time</h2>"
+                f"<svg viewBox='0 0 {W} {H}' "
+                f"style='max-width:100%;background:#161b22;border:1px solid "
+                f"var(--border);border-radius:8px'>"
+                f"<polyline points='{polyline}' fill='none' "
+                f"stroke='#79c0ff' stroke-width='2'/>{circles}</svg>"
+            )
+
         trs = "".join(
             f"<tr><td><a href='/scan/{row['id']}'>#{row['id']}</a></td>"
             f"<td>{row['started_at'][:19]}</td>"
@@ -72,9 +104,10 @@ def create_app(db_path: str | Path = "netsight.db") -> Flask:
             for row in rows
         )
         body = (
-            "<table><thead><tr><th>ID</th><th>Started (UTC)</th>"
-            "<th>Subnet</th><th>Hosts</th><th>Duration</th></tr></thead>"
-            f"<tbody>{trs}</tbody></table>"
+            chart_html
+            + "<table><thead><tr><th>ID</th><th>Started (UTC)</th>"
+              "<th>Subnet</th><th>Hosts</th><th>Duration</th></tr></thead>"
+              f"<tbody>{trs}</tbody></table>"
         )
         return _page(body)
 

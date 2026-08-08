@@ -4,23 +4,34 @@ Subcommands:
     scan     Full discovery: sweep, host info, optional port scan & export.
     quick    Fast overview: auto-detect subnet, ping sweep only.
     history  previous scans: ``history list`` / ``history show <id>``.
+    diff     compare two scans (new/gone devices, port deltas).
+    label    persistent per-IP device labels + trust flags.
+    probe    deep single-host reconnaissance (TCP/UDP/traceroute/OS).
+    watch    repeat scan every N seconds, print only deltas, alert on unknown.
+    dashboard local Flask UI over netsight.db.
 
-Safety: every active scan validates the target against RFC1918 ranges and
+Safety: every active scan validates targets against RFC1918 ranges and
 shows an authorization banner requiring confirmation (skip with --yes).
 """
 
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from netsight import discovery, exporter, history_db, ui
 from netsight.hooks import run_post_scan_hooks
 from netsight.host_info import resolve_hostname
-from netsight.models import HostResult, ScanResult, utc_now_iso
-from netsight.os_fingerprint import HAS_NMAP, deep_fingerprint, guess_os_from_ttl
+from netsight.models import (
+    HostResult, MultiScanResult, ScanResult, utc_now_iso,
+)
+from netsight.os_fingerprint import (
+    HAS_NMAP, deep_fingerprint, guess_os_from_ttl,
+)
 from netsight.ping_sweep import sweep
 from netsight.port_scan import parse_ports, scan_host
 from netsight.vendor_lookup import lookup_vendor
@@ -48,8 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
     quick = sub.add_parser(
         "quick", help="fast overview: auto-detect subnet, sweep only"
     )
-    quick.add_argument("--threads", type=int, default=64,
-                       help="sweep thread count (default: 64)")
+    quick.add_argument("--threads", type=int, default=100,
+                       help="sweep thread count (default: 100)")
     quick.add_argument("--timeout", type=int, default=800,
                        help="per-host timeout in ms (default: 800)")
     quick.add_argument("-y", "--yes", action="store_true",
@@ -110,8 +121,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="skip authorization confirmation")
     watch.add_argument("--allow-public", action="store_true",
                        help="allow non-RFC1918 targets")
-    watch.add_argument("--threads", type=int, default=64,
-                       help="sweep thread count (default: 64)")
+    watch.add_argument("--threads", type=int, default=100,
+                       help="sweep thread count (default: 100)")
     watch.add_argument("--timeout", type=int, default=800,
                        help="per-host timeout in ms (default: 800)")
     watch.add_argument("--alert-toast", action="store_true",
@@ -161,8 +172,8 @@ def _add_scan_args(scan: argparse.ArgumentParser) -> None:
                       help="export formats: csv,json (comma separated)")
     scan.add_argument("--output", type=Path, default=None,
                       help="export directory (default: ./exports)")
-    scan.add_argument("--threads", type=int, default=64,
-                      help="sweep thread count (default: 64)")
+    scan.add_argument("--threads", type=int, default=100,
+                      help="sweep thread count (default: 100)")
     scan.add_argument("--port-threads", type=int, default=100,
                       help="port-scan thread count (default: 100)")
     scan.add_argument("--timeout", type=int, default=800,
@@ -177,6 +188,16 @@ def _add_scan_args(scan: argparse.ArgumentParser) -> None:
                       help="do not save this run to the history database")
     scan.add_argument("--db", type=Path, default=Path("netsight.db"),
                       help="history database path (default: ./netsight.db)")
+    scan.add_argument("--log-file", type=Path, default=None, metavar="PATH",
+                      help="append structured JSON logs (feature F10)")
+    scan.add_argument("--alert-toast", action="store_true",
+                      help="Windows toast when an unknown device appears")
+    scan.add_argument("--alert-slack", metavar="WEBHOOK", default=None,
+                      help="Slack incoming webhook for unknown devices")
+    scan.add_argument("--alert-email", action="store_true",
+                      help="SMTP alert via SIGHT_SMTP_* env vars")
+    scan.add_argument("--scan-udp", action="store_true",
+                       help="probe common UDP services (53/123/137/161/5353)")
 
 
 def _pick_subnet(explicit: str | None) -> str | None:
@@ -224,8 +245,52 @@ def _gate(cidr: str, *, auto_yes: bool, allow_public: bool) -> bool:
     return True
 
 
+def _gate_all(cidrs: list[str], *, auto_yes: bool,
+               allow_public: bool) -> bool:
+    """Ask consent once for several subnets (multi-subnet scans)."""
+    ui.show_authorization_banner()
+    if not ui.confirm_authorization(auto_yes=auto_yes):
+        ui.warn("Authorization not confirmed — scan aborted.")
+        return False
+    return True
+
+
+def _hostresult_from_sweep(res) -> HostResult:
+    """Convert a SweepResult into a partially-enriched HostResult."""
+    return HostResult(
+        ip=res.ip,
+        alive=res.alive,
+        mac=res.mac or "Unknown",
+        ttl=res.ttl,
+        response_ms=res.response_ms,
+    )
+
+
+def _enrich_host(host: HostResult) -> HostResult:
+    """Worker: hostname/vendor/OS enrichment for one host."""
+    host.hostname = resolve_hostname(host.ip)
+    host.vendor = lookup_vendor(host.mac)
+    host.os_guess = guess_os_from_ttl(host.ttl)
+    return host
+
+
+def _scan_ports_for_host(
+    host: HostResult, ports: list[int], max_workers: int
+) -> HostResult:
+    """Worker: TCP scan on one host, attach open ports in place."""
+    result = scan_host(host.ip, ports,
+                       max_workers=max_workers, timeout=1.0)
+    host.open_ports = [
+        {"port": p.port, "banner": p.banner, "service": p.service}
+        for p in result.open
+    ]
+    return host
+
+
 def cmd_quick(args: argparse.Namespace) -> int:
     """Fast sweep-only scan of the auto-detected local subnet."""
+    from netsight import slog
+    slog.configure(args.log_file)
     ui.show_banner()
     cidr = discovery.default_subnet()
     if cidr is None:
@@ -276,12 +341,31 @@ def cmd_quick(args: argparse.Namespace) -> int:
 
 def cmd_scan(args: argparse.Namespace) -> int:
     """Full scan: sweep, enrichment, port scan, export, history."""
+    from netsight import slog
+    slog.configure(args.log_file)
     ui.show_banner()
-    cidr = _pick_subnet(args.subnet)
-    if cidr is None:
-        return 1
-    ui.info(f"Target subnet: [bold]{cidr}[/bold]")
-    if not _gate(cidr, auto_yes=args.yes, allow_public=args.allow_public):
+
+    # Plan2 v2.0: multi-subnet support — "--subnet A,B,C" runs every
+    # subnet concurrently and merges results into a MultiScanResult.
+    cidrs: list[str] = [s.strip() for s in args.subnet.split(",")
+                        if s.strip()] if args.subnet else []
+    if not cidrs:
+        picked = _pick_subnet(None)
+        if picked is None:
+            return 1
+        cidrs = [picked]
+
+    # Validate + gate *every* subnet before scanning.
+    for cidr in cidrs:
+        reason = discovery.validate_target(cidr, allow_public=args.allow_public)
+        if reason is not None:
+            ui.error(f"{cidr}: {reason}")
+            return 1
+
+    ui.info(f"Target{'s' if len(cidrs) > 1 else ''} "
+            f"subnet{'s' if len(cidrs) > 1 else ''}: "
+            + ", ".join(f"[bold]{c}[/bold]" for c in cidrs))
+    if not _gate_all(cidrs, auto_yes=args.yes, allow_public=args.allow_public):
         return 2
 
     ports: list[int] = []
@@ -295,20 +379,24 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if args.deep_scan and not HAS_NMAP:
         ui.warn("python-nmap not installed — falling back to TTL heuristics.")
 
-    result = ScanResult(subnet=cidr)
+    # -- 1. Sweep -------------------------------------------------------------
+    children: list[ScanResult] = []
     start = time.perf_counter()
 
     from netsight import ping_sweep
+    from netsight.ping_sweep import sweep_multi
 
-    # 1) Discover alive hosts.
-    with ui.build_progress("Discovering hosts") as progress:
-        task_id = progress.add_task("sweep", total=None)
-        results = sweep(
-            cidr,
+    with ui.build_progress("Sweeping") as progress:
+        task_id = progress.add_task("sweep", total=len(cidrs))
+        results_per = sweep_multi(
+            cidrs,
             max_workers=args.threads,
             timeout_ms=args.timeout,
+            progress_callback=lambda done, total: progress.update(
+                task_id, completed=done, total=total
+            ),
         )
-        progress.update(task_id, total=1, completed=1)
+        progress.update(task_id, completed=len(cidrs))
 
     if ping_sweep.last_fallback_reason:
         ui.info(
@@ -316,71 +404,101 @@ def cmd_scan(args: argparse.Namespace) -> int:
             + ping_sweep.last_fallback_reason
         )
 
-    if not results:
-        ui.warn("No alive hosts found.")
-        result.finished_at = utc_now_iso()
-        result.duration_s = time.perf_counter() - start
-        ui.show_summary(result)
+    # Map findings back to per-subnet ScanResult buckets. Each host lands
+    # in the smallest containing CIDR.
+    for cidr in cidrs:
+        children.append(ScanResult(subnet=cidr))
+    net_map = [
+        (ipaddress.ip_network(c, strict=False), child)
+        for c, child in zip(cidrs, children, strict=True)
+    ]
+    net_map.sort(key=lambda t: t[0].num_addresses)  # smallest first
+    for res in results_per:
+        ip_obj = ipaddress.ip_address(res.ip)
+        for net, child in net_map:
+            if ip_obj in net:
+                child.hosts.append(_hostresult_from_sweep(res))
+                break
+
+    # -- 2. Enrich -------------------------------------------------------------
+    combined = MultiScanResult(
+        subnet=",".join(cidrs), children=children,
+    )
+    all_hosts = [h for sub in children for h in sub.hosts]
+    if not all_hosts:
+        ui.warn("No alive hosts found in any subnet.")
+        combined.finished_at = utc_now_iso()
+        combined.duration_s = time.perf_counter() - start
+        ui.show_summary(combined)
         return 0
 
-    # 2) Enrich hosts: hostname, MAC vendor, OS guess.
+    from concurrent.futures import ThreadPoolExecutor
     with ui.build_progress("Enriching hosts") as progress:
-        task = progress.add_task("enrich", total=len(results))
-        for res in results:
-            host = HostResult(
-                ip=res.ip,
-                alive=True,
-                mac=res.mac or "Unknown",
-                ttl=res.ttl,
-                response_ms=res.response_ms,
-            )
-            host.hostname = resolve_hostname(res.ip)
-            host.vendor = lookup_vendor(host.mac)
-            host.os_guess = guess_os_from_ttl(res.ttl)
-            if args.deep_scan and HAS_NMAP:
+        task = progress.add_task("enrich", total=len(all_hosts))
+        with ThreadPoolExecutor(max_workers=min(len(all_hosts), 32)) as pool:
+            futures = {
+                pool.submit(_enrich_host, res): res
+                for res in [_hostresult_from_sweep(r) for r in all_hosts]
+            }
+            hosts_done: list[HostResult] = []
+            for fut in as_completed(futures):
                 try:
-                    host.os_guess = deep_fingerprint(res.ip)
-                except RuntimeError as exc:
-                    ui.warn(f"nmap OS scan skipped for {res.ip}: {exc}")
-            result.hosts.append(host)
-            progress.advance(task)
-
-    # 3) Port scan each host.
-    if ports:
-        with ui.build_progress("Scanning ports") as progress:
-            task = progress.add_task("ports", total=len(result.hosts))
-            for host in result.hosts:
-                scan_res = scan_host(
-                    host.ip,
-                    ports,
-                    max_workers=args.port_threads,
-                    timeout=1.0,
-                )
-                host.open_ports = [
-                    {"port": p.port, "banner": p.banner}
-                    for p in scan_res.open
-                ]
+                    hosts_done.append(fut.result())
+                except Exception as exc:  # noqa: BLE001 - don't die on one host
+                    ui.warn(f"Enrichment failed for {futures[fut].ip}: {exc}")
                 progress.advance(task)
 
-    result.finished_at = utc_now_iso()
-    result.duration_s = time.perf_counter() - start
+    combined.hosts.extend(HostResult(**h.__dict__) for h in hosts_done)
 
-    ui.show_results_table(result)
-    ui.show_port_details(result)
+    # -- 3. Port scan -----------------------------------------------------------
+    if ports:
+        with ui.build_progress("Scanning ports") as progress:
+            task = progress.add_task("ports", total=len(combined.alive_hosts))
+            with ThreadPoolExecutor(
+                max_workers=min(len(combined.alive_hosts), 4)
+            ) as pool:
+                futures = [
+                    pool.submit(
+                        _scan_ports_for_host, host, ports, args.port_threads
+                    )
+                    for host in combined.alive_hosts
+                ]
+                for fut in as_completed(futures):
+                    progress.advance(task)
 
-    # 4) Persist + export.
+    combined.finished_at = utc_now_iso()
+    combined.duration_s = time.perf_counter() - start
+
+    # -- 4. Display + persist + export -----------------------------------------
+    ui.show_results_table(combined)
+    ui.show_port_details(combined)
+
     scan_id: int | None = None
     if not args.no_db:
         with history_db.HistoryDB(args.db) as db:
-            scan_id = db.save_scan(result)
-        run_post_scan_hooks(result, scan_id)
+            scan_id = db.save_scan(combined)
 
-    ui.show_summary(result, scan_id=scan_id)
+        # Determine newly-unknown devices for alerting.
+        from netsight.history_db import HistoryDB
+        with HistoryDB(args.db) as db:
+            alive_ips = [h.ip for h in combined.alive_hosts]
+            unknown = db.unknown_devices(alive_ips)
+
+        if (args.alert_toast or args.alert_slack or args.alert_email) and unknown:
+            run_post_scan_hooks(
+                combined, scan_id,
+                unknown_ips=unknown,
+                slack_webhook=args.alert_slack,
+                toast=args.alert_toast,
+                email=args.alert_email,
+            )
+
+    ui.show_summary(combined, scan_id=scan_id)
 
     if args.export:
         formats = [f for f in args.export.split(",") if f.strip()]
         try:
-            written = exporter.export_scan(result, formats, args.output)
+            written = exporter.export_scan(combined, formats, args.output)
             for path in written:
                 ui.success(f"Exported: {path}")
         except ValueError as exc:
@@ -453,6 +571,8 @@ def cmd_label(args: argparse.Namespace) -> int:
 
 def cmd_probe(args: argparse.Namespace) -> int:
     """Deep, single-host reconnaissance (feature F4)."""
+    from netsight import slog
+    slog.configure(args.log_file)
     ui.show_banner()
     if not _gate(args.ip + "/32", auto_yes=args.yes,
                  allow_public=args.allow_public):
@@ -658,6 +778,8 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 
 def cmd_history(args: argparse.Namespace) -> int:
     """List past scans or show/re-export one by ID."""
+    from netsight import slog
+    slog.configure(getattr(args, "log_file", None))
     ui.show_banner()
     db_path = _db_path_from_args(args)
     with history_db.HistoryDB(db_path) as db:

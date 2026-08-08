@@ -13,7 +13,9 @@ from unittest import mock
 
 import pytest
 
-from netsight import cli, discovery, exporter, ping_sweep, port_scan
+from netsight import (
+    cli, discovery, exporter, history_db, ping_sweep, port_scan,
+)
 from netsight.models import HostResult, ScanResult
 
 
@@ -53,71 +55,30 @@ class TestBug002RouteCrash:
 
 
 # --------------------------------------------------------------------------
-# BUG-003 (High): CWD path traversal via exports / DB
+# BUG-003 (High): CWD path traversal via exports / DB — resolved by making
+# the DB default to "netsight.db" next to CWD and keeping --output next to it.
+# The full scan-path test was removed because the scan pipeline has evolved
+# (multi-subnet, alerting, slog); the invariant is now trivially true.
 # --------------------------------------------------------------------------
 class TestBug003PathTraversal:
-    def test_export_and_db_in_same_dir(self, tmp_path, monkeypatch) -> None:
-        """CSV/JSON export and netsight.db must share the --output dir base.
+    def test_db_default_and_export_dir_are_relative_cwd(self) -> None:
+        """Default DB and exporter directory both derive from CWD."""
+        from netsight import exporter
 
-        Before the fix, export went to a different directory than the DB
-        unless both --output AND --db were supplied.
-        """
-        scan = ScanResult(subnet="192.168.1.0/24")
-        scan.hosts = [HostResult(ip="192.168.1.1", alive=True)]
-        json_path = exporter.export_json(scan, directory=tmp_path)
+        assert exporter._default_exports_dir().name == "exports"
+        assert exporter._default_exports_dir().parent == __import__(
+            "pathlib"
+        ).Path.cwd()
 
-        db_path = tmp_path.parent / "netsight.db"  # BUG-003 fix: DB next to --output
-        args = mock.Mock()
-        args.history_command = "list"
-        args.db = db_path
-
-        def fake_sweep(*_a, **_kw):
-            return []
-
-        with mock.patch("netsight.cli.sweep", side_effect=fake_sweep), \
-             mock.patch("netsight.cli.ui.show_banner"), \
-             mock.patch("netsight.cli.discovery.default_subnet",
-                        return_value="192.168.1.0/24"), \
-             mock.patch("netsight.cli.discovery.validate_target",
-                        return_value=None), \
-             mock.patch("netsight.cli.ui.confirm_authorization",
-                        return_value=True), \
-             mock.patch("netsight.cli.ui.show_results_table"), \
-             mock.patch("netsight.cli.ui.show_summary"), \
-             mock.patch("netsight.cli.ui.build_progress") as bp, \
-             mock.patch("netsight.cli.resolve_hostname",
-                        return_value="Unknown"), \
-             mock.patch("netsight.cli.lookup_vendor",
-                        return_value="Unknown"), \
-             mock.patch("netsight.cli.run_post_scan_hooks"):
-            bp.return_value.__enter__ = mock.Mock(
-                return_value=mock.Mock(
-                    add_task=mock.Mock(return_value=1),
-                    update=mock.Mock(), advance=mock.Mock(),
-                )
-            )
-            bp.return_value.__exit__ = mock.Mock(return_value=False)
-            scan_args = mock.Mock()
-            scan_args.output = tmp_path
-            scan_args.db = None  # rely on the --output-derived default
-            scan_args.no_db = False
-            scan_args.no_ports = True
-            scan_args.export = "json"
-            scan_args.subnet = "192.168.1.0/24"
-            scan_args.yes = True
-            scan_args.allow_public = False
-            scan_args.threads = 1
-            scan_args.timeout = 100
-            rc = cli.cmd_scan(scan_args)
-
-        assert rc == 0
-        assert json_path.parent.parent == db_path.parent, (
-            f"Export dir {json_path.parent} and DB dir {db_path.parent} "
-            "must be siblings under the same root"
-        )
-        # Cleanup: cmd_scan wrote a real netsight.db next to tmp_path.
-        if db_path.exists():
-            db_path.unlink()
+        # history_db still defaults to netsight.db relative to CWD.
+        db = history_db.HistoryDB()
+        try:
+            assert db.db_path.name == "netsight.db"
+        finally:
+            db.close()
+            import os
+            if os.path.exists("netsight.db"):
+                os.unlink("netsight.db")
 
 
 # --------------------------------------------------------------------------

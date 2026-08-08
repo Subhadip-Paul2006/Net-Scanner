@@ -14,7 +14,8 @@ from netsight.models import ScanResult
 #: once with an empty port column.
 CSV_FIELDS = (
     "ip", "hostname", "mac", "vendor", "os_guess", "ttl",
-    "response_ms", "alive", "port", "banner", "detected_at",
+    "response_ms", "latency_class", "vuln_hints", "alive",
+    "port", "banner", "detected_at",
 )
 
 
@@ -32,43 +33,30 @@ def _host_rows(scan: ScanResult) -> list[dict[str, object]]:
     """Flatten a ScanResult into CSV rows (one row per host/port pair)."""
     rows: list[dict[str, object]] = []
     for host in scan.hosts:
+        base: dict[str, object] = {
+            "ip": host.ip,
+            "hostname": host.hostname,
+            "mac": host.mac,
+            "vendor": host.vendor,
+            "os_guess": host.os_guess,
+            "ttl": host.ttl if host.ttl is not None else "",
+            "response_ms": (
+                host.response_ms if host.response_ms is not None else ""
+            ),
+            "latency_class": host.latency_class,
+            "vuln_hints": "; ".join(host.vuln_hints),
+            "alive": host.alive,
+            "detected_at": host.detected_at,
+        }
         if host.open_ports:
             for port in host.open_ports:
-                rows.append(
-                    {
-                        "ip": host.ip,
-                        "hostname": host.hostname,
-                        "mac": host.mac,
-                        "vendor": host.vendor,
-                        "os_guess": host.os_guess,
-                        "ttl": host.ttl if host.ttl is not None else "",
-                        "response_ms": (
-                            host.response_ms if host.response_ms is not None else ""
-                        ),
-                        "alive": host.alive,
-                        "port": port.get("port", ""),
-                        "banner": port.get("banner", ""),
-                        "detected_at": host.detected_at,
-                    }
-                )
+                rows.append({
+                    **base,
+                    "port": port.get("port", ""),
+                    "banner": port.get("banner", ""),
+                })
         else:
-            rows.append(
-                {
-                    "ip": host.ip,
-                    "hostname": host.hostname,
-                    "mac": host.mac,
-                    "vendor": host.vendor,
-                    "os_guess": host.os_guess,
-                    "ttl": host.ttl if host.ttl is not None else "",
-                    "response_ms": (
-                        host.response_ms if host.response_ms is not None else ""
-                    ),
-                    "alive": host.alive,
-                    "port": "",
-                    "banner": "",
-                    "detected_at": host.detected_at,
-                }
-            )
+            rows.append({**base, "port": "", "banner": ""})
     return rows
 
 
@@ -292,7 +280,7 @@ def export_scan(
 
     Args:
         scan: The completed scan result.
-        formats: Any of ``"csv"``, ``"json"``, ``"html"``.
+        formats: Any of ``"csv"``, ``"json"``, ``"html"``, ``"pdf"``.
         directory: Output directory (defaults to ./exports).
 
     Returns:
@@ -310,8 +298,11 @@ def export_scan(
             written.append(export_json(scan, directory))
         elif fmt == "html":
             written.append(export_html(scan, directory))
+        elif fmt == "pdf":
+            from netsight.pdf_report import export_pdf
+            written.append(export_pdf(scan, directory))
         elif fmt:
             raise ValueError(
-                f"Unknown export format '{fmt}' (use csv/json/html)"
+                f"Unknown export format '{fmt}' (use csv/json/html/pdf)"
             )
     return written

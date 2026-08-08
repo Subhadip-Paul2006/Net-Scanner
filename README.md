@@ -30,13 +30,36 @@ CLI for inventorying *your own* private networks.
   command, all threaded with `concurrent.futures`.
 - **Host enrichment** — reverse-DNS hostname, MAC from the ARP table,
   MAC OUI vendor lookup, response time, and TTL-based OS guessing
-  (Linux ~64, Windows ~128, network gear ~255).
+  (Linux/macOS ≈64, Windows ≈128, network gear ≈255 — heuristic, not a
+  guarantee).
 - **Port scan** — threaded TCP connect scan (default 100 workers) over a
-  configurable port set with basic banner grabbing. No exploitation, no
-  brute force.
-- **Exports** — timestamped CSV + JSON under `exports/`.
-- **Scan history** — every run is stored in `netsight.db` (SQLite);
-  list and re-export past scans by ID.
+  configurable port set with banner grabbing. No exploitation, no brute force.
+- **Latency classification** — each host is tagged `excellent`/`good`/`poor`
+  from its ping RTT (Plan2 Phase 8: ≤5ms, ≤50ms, >50ms).
+- **Multi-subnet scans** — `--subnet 192.168.1.0/24,10.0.0.0/24` sweeps every
+  listed subnet concurrently and merges results (v2.0 🌍).
+- **PDF report** — `--export pdf` writes a self-contained, printable PDF
+  (stdlib-only; no external PDF library needed) (v2.0 📄).
+- **Vulnerability hints** — open risky ports (Telnet, SMB, RDP, DBs, Redis,
+  MongoDB) are tagged with one-line warnings in exports + UI (v2.0 🔒).
+- **Activity charts** — the dashboard shows a "hosts discovered over time"
+  sparkline across scan history (v2.0 📈).
+- **Service version (F7)** — banners parsed into `ssh OpenSSH_9.6` /
+  `http nginx/1.24` strings; ports fall back to conventional service names.
+- **Exports** — timestamped CSV, JSON, and self-contained sortable HTML.
+- **Scan history (F1)** — every run stored in `netsight.db` (SQLite);
+  `netsight diff OLD NEW` shows new/gone devices and port changes.
+- **Device labels (F2)** — persistent per-IP inventory with `trusted`
+  flag, human label, and notes.
+- **Probe (F4)** — deep single-host reconnaissance: TCP + UDP services,
+  traceroute, optional nmap OS scan, rich per-host report.
+- **Watch (F5)** — repeat scans every N seconds, print only deltas,
+  alert on untrusted device joins.
+- **Dashboard (F6)** — local Flask UI over `netsight.db` with JSON API.
+- **UDP scan (F9)** — probes DNS/SNMP/NTP/NetBIOS/mDNS on each host.
+- **Alert hooks (F8)** — Windows toast / Slack webhook / SMTP email
+  when an unknown device appears.
+- **Structured logging (F10)** — JSON rotating file via `--log-file`.
 - **Polished CLI** — `rich` tables, progress bars, panels.
 - **Graceful degradation** — every optional dependency is wrapped in
   `try/except ImportError`; the tool always falls back instead of
@@ -47,7 +70,8 @@ CLI for inventorying *your own* private networks.
 - Python **3.12+**
 - Core deps: `rich`, `psutil`, `pandas`, and `netifaces` (non-Windows).
 - Optional deps: `scapy` (ARP sweep), `python-nmap` (`--deep-scan`),
-  `mac-vendor-lookup` (full OUI database), `colorama`.
+  `mac-vendor-lookup` (full OUI database), `flask` (dashboard),
+  `colorama`.
 
 ```bash
 pip install -r requirements.txt
@@ -67,6 +91,12 @@ after `pip install -e .` as `netsight ...`.
 # Fast overview of the auto-detected local subnet (sweep only)
 python main.py quick
 
+# Multi-subnet scan (v2.0): comma-separated CIDRs
+python main.py scan --subnet 192.168.1.0/24,10.0.0.0/24 --yes
+
+# PDF report along with CSV + JSON (v2.0)
+python main.py scan --subnet 192.168.1.0/24 --export csv,json,html,pdf
+
 # Full scan of a subnet with default common ports, export to CSV+JSON
 python main.py scan --subnet 192.168.1.0/24 --export csv,json
 
@@ -83,6 +113,27 @@ python main.py scan --subnet 192.168.1.0/24 --deep-scan
 python main.py history list
 python main.py history show 3
 python main.py history show 3 --export csv
+
+# Compare two scans: new/gone devices + port deltas (F1)
+python main.py diff 1 2
+
+# Label devices you recognize — powers unknown-device alerts (F2)
+python main.py label set 192.168.1.99 "Dad's laptop" --trusted
+python main.py label list
+python main.py label remove 192.168.1.99
+
+# Deep single-host probe: TCP+UDP services, traceroute, OS guess (F4)
+python main.py probe 192.168.1.1 --traceroute
+
+# Repeat scans every 60 s, print only the delta, alert on unknown (F5+F8)
+python main.py watch --subnet 192.168.1.0/24 --interval 60 \
+    --alert-toast --alert-slack https://hooks.slack.com/...
+
+# Local Flask dashboard over the SQLite history (F6)
+python main.py dashboard --port 8080
+
+# Structured JSON logging (F10)
+python main.py scan --subnet 192.168.1.0/24 --log-file logs/netsight.log
 ```
 
 Targets are validated before scanning:
@@ -105,19 +156,30 @@ netsight/
 │   ├── host_info.py      # hostname, MAC via ARP table
 │   ├── vendor_lookup.py  # MAC OUI -> vendor (offline fallback table)
 │   ├── os_fingerprint.py # TTL heuristics (+ optional nmap -O)
-│   ├── port_scan.py      # threaded TCP connect scan + banner grab
-│   ├── exporter.py       # CSV + JSON export
-│   ├── history_db.py     # SQLite scan history (scans + hosts tables)
-│   ├── ui.py             # rich banners, tables, progress
-│   └── hooks/            # v1.1+ extension point (empty stub)
-├── tests/
+│   ├── port_scan.py      # threaded TCP connect scan + banner grab (F7)
+│   ├── differ.py         # scan-vs-scan delta engine (F1)
+│   ├── service_version.py# banner -> "service version" parser (F7)
+│   ├── udp_scan.py       # UDP service probes: dns/ntp/netbios/snmp (F9)
+│   ├── slog.py           # JSON rotating structured logging (F10)
+│   ├── exporter.py       # CSV + JSON + self-contained HTML export (F3)
+│   ├── history_db.py     # SQLite scan history + device inventory (F2)
+│   ├── dashboard.py      # local Flask UI over history (F6)
+│   ├── ui.py             # rich banners, tables, progress, diff/probe views
+│   └── hooks/            # alert backends: toast/slack/email (F8)
+├── tests/                # pytest suite — all network I/O mocked
+├── exports/              # scan reports written here
+├── logs/                 # JSON log files (--log-file)
+├── netsight.db           # SQLite history + device inventory
+├── src/                  # project assets (README logo)
 ├── requirements.txt
 ├── README.md
-└── main.py
+├── BUGREPORT.md          # VAPT findings + fix mapping
+└── main.py               # entry-point launcher
 ```
 
-`discovery.py`, `ping_sweep.py`, and `port_scan.py` are plain importable
-modules — no CLI coupling — so they can be tested or reused directly.
+`discovery.py`, `ping_sweep.py`, `port_scan.py`, `differ.py`,
+`service_version.py`, `udp_scan.py` are plain importable modules — no
+CLI coupling — so they can be tested or reused directly.
 
 ## Tests
 
