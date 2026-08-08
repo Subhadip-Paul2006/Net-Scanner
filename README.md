@@ -12,6 +12,15 @@ CLI for inventorying *your own* private networks.
 > RFC1918 target validation and asks for confirmation before sending a
 > single packet.
 
+## Table of Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Usage](#usage)
+- [Project layout](#project-layout)
+- [Tests](#tests)
+- [Safety by design](#safety-by-design)
+
 ## Features
 
 - **Local network discovery** — enumerates interfaces via
