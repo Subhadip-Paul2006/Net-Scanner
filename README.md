@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="src/logo.png" alt="NetSight Logo" width="100%">
+</p>
+
 # NetSight
 
 **Network Discovery & Device Scanner** — a lightweight, enterprise-styled
