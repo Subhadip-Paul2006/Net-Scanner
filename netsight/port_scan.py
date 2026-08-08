@@ -28,6 +28,7 @@ class PortResult:
     port: int
     status: str  # "open", "closed", "filtered"
     banner: str = ""
+    service: str | None = None  # parsed "ssh OpenSSH_9.6" (feature F7)
 
 
 @dataclass
@@ -151,6 +152,54 @@ def scan_host(
     banner: bool = True,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> PortScanResult:
+    """Scan a list of TCP ports on one host with a thread pool.
+
+    Args:
+        ip: Target IPv4 address.
+        ports: Ports to probe.
+        max_workers: Thread pool size (default 100).
+        timeout: Per-connection timeout in seconds — no hanging sockets.
+        banner: Attempt banner grabbing on open ports.
+        progress_callback: Optional callable(completed, total).
+
+    Returns:
+        A :class:`PortScanResult` containing all probe results, sorted
+        by port number. ``open_ports`` entries also carry a parsed
+        ``service`` field (e.g. ``"ssh OpenSSH_9.6"``) once they're
+        collected (feature F7).
+    """
+    result = PortScanResult(ip=ip)
+    total = len(ports)
+    completed = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(scan_port, ip, port, timeout, banner): port
+            for port in ports
+        }
+        for future in as_completed(futures):
+            try:
+                result.ports.append(future.result())
+            except Exception:  # noqa: BLE001 - never die on one bad probe
+                result.ports.append(
+                    PortResult(port=futures[future], status="filtered")
+                )
+            completed += 1
+            if progress_callback is not None:
+                progress_callback(completed, total)
+    result.ports.sort(key=lambda p: p.port)
+
+    # Attach parsed service/version to each open port (feature F7).
+    if banner:
+        try:
+            from netsight.service_version import parse_service_version
+
+            for port_result in result.open:
+                port_result.service = parse_service_version(
+                    port_result.port, port_result.banner
+                )
+        except ImportError:  # pragma: no cover - module should always ship
+            pass
+    return result
     """Scan a list of TCP ports on one host with a thread pool.
 
     Args:

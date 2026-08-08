@@ -2,6 +2,24 @@
 
 Welcome to the comprehensive architecture and workflow documentation for **NetSight**, an enterprise-styled, safety-first network discovery and device scanner built in Python 3.12+.
 
+## Table of Contents
+
+- [1. Project Overview](#1-project-overview)
+  - [Key Characteristics & Safety Design](#key-characteristics--safety-design)
+- [2. File & Code Structure Breakdown](#2-file--code-structure-breakdown)
+  - [Detailed Component Summary](#detailed-component-summary)
+- [3. High-Level Architecture & System Workflow](#3-high-level-architecture--system-workflow)
+  - [3.1 System Architecture Diagram](#31-system-architecture-diagram)
+  - [3.2 End-to-End Scan Execution Flow](#32-end-to-end-scan-execution-flow)
+- [4. SQLite Database Schema (`netsight.db`)](#4-sqlite-database-schema-netsightdb)
+- [5. Practical Daily Life Use Cases](#5-practical-daily-life-use-cases)
+- [6. How to Setup and Run NetSight](#6-how-to-setup-and-run-netsight)
+  - [6.1 Prerequisites](#61-prerequisites)
+  - [6.2 Installation Steps](#62-installation-steps)
+  - [6.3 Command Execution Reference](#63-command-execution-reference)
+  - [6.4 Running Automated Unit Tests](#64-running-automated-unit-tests)
+- [7. Extension Points (v1.1+)](#7-extension-points-v11)
+
 ---
 
 ## 1. Project Overview
