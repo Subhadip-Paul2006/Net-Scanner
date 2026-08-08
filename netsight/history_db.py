@@ -40,6 +40,19 @@ CREATE TABLE IF NOT EXISTS hosts (
 
 CREATE INDEX IF NOT EXISTS idx_hosts_scan_id ON hosts(scan_id);
 CREATE INDEX IF NOT EXISTS idx_hosts_ip      ON hosts(ip);
+
+-- Persistent per-IP device inventory. Owned/labeled devices the user has
+-- reviewed; a device absent from this table (or trusted=0) is "unknown"
+-- and triggers alerts (feature F8).
+CREATE TABLE IF NOT EXISTS devices (
+    ip            TEXT PRIMARY KEY,
+    label         TEXT NOT NULL DEFAULT '',
+    trusted       INTEGER NOT NULL DEFAULT 0,
+    notes         TEXT NOT NULL DEFAULT '',
+    first_seen    TEXT,
+    last_seen     TEXT,
+    seen_count    INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -124,6 +137,86 @@ class HistoryDB:
             (limit,),
         )
         return [dict(row) for row in cursor.fetchall()]
+
+    # ------------------------------------------------------------------
+    # Device inventory (labels, trust) — feature F2.
+    # ------------------------------------------------------------------
+
+    def set_device(self, ip: str, *, label: str | None = None,
+                   trusted: bool | None = None,
+                   notes: str | None = None) -> None:
+        """Create/update a device row. Only provided fields are changed."""
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO devices (ip) VALUES (?)", (ip,)
+            )
+            assignments: list[str] = []
+            params: list[object] = []
+            if label is not None:
+                assignments.append("label = ?")
+                params.append(label)
+            if trusted is not None:
+                assignments.append("trusted = ?")
+                params.append(1 if trusted else 0)
+            if notes is not None:
+                assignments.append("notes = ?")
+                params.append(notes)
+            if assignments:
+                params.append(ip)
+                self._conn.execute(
+                    f"UPDATE devices SET {', '.join(assignments)} "
+                    "WHERE ip = ?",
+                    params,
+                )
+
+    def get_device(self, ip: str) -> dict[str, object] | None:
+        """Return the device row for an IP, or None if never seen."""
+        cursor = self._conn.execute(
+            "SELECT * FROM devices WHERE ip = ?", (ip,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def list_devices(self) -> list[dict[str, object]]:
+        """All device rows ordered by IP."""
+        cursor = self._conn.execute("SELECT * FROM devices ORDER BY ip")
+        return [dict(row) for row in cursor.fetchall()]
+
+    def remove_device(self, ip: str) -> bool:
+        """Delete a device row. Returns True if a row was removed."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM devices WHERE ip = ?", (ip,)
+            )
+        return cursor.rowcount > 0
+
+    def touch_devices(self, ips: list[str], seen_at: str) -> None:
+        """Mark IPs as observed at ``seen_at``, bumping seen_count."""
+        with self._conn:
+            for ip in ips:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO devices (ip, first_seen) "
+                    "VALUES (?, ?)",
+                    (ip, seen_at),
+                )
+                self._conn.execute(
+                    "UPDATE devices SET last_seen = ?, "
+                    "seen_count = seen_count + 1 WHERE ip = ?",
+                    (seen_at, ip),
+                )
+
+    def unknown_devices(self, ips: list[str]) -> list[str]:
+        """Return the subset of ``ips`` that are not marked trusted."""
+        if not ips:
+            return []
+        placeholders = ",".join("?" for _ in ips)
+        cursor = self._conn.execute(
+            f"SELECT ip FROM devices WHERE ip IN ({placeholders}) "
+            "AND trusted = 1",
+            ips,
+        )
+        trusted = {str(row["ip"]) for row in cursor.fetchall()}
+        return [ip for ip in ips if ip not in trusted]
 
     def get_scan(self, scan_id: int) -> ScanResult | None:
         """Load a full scan result (with hosts) by scan id.
